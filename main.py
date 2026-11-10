@@ -1,12 +1,13 @@
-Python
 import os
 import io
+import asyncio
 import logging
 from PIL import Image
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from google import genai
 from google.genai import types
+from aiohttp import web
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
@@ -58,13 +59,48 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logging.error(f"Photo Error: {e}")
         await update.message.reply_text("分析圖片時出咗錯。")
 
-def main():
+# 簡單的 HTTP 伺服器，讓 Render 的 Web Service 認定 App 正在運行
+async def handle_health_check(request):
+    return web.Response(text="Bot is running!")
+
+async def main():
     tg_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    app = Application.builder().token(tg_token).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.run_polling()
+    if not tg_token:
+        raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable")
+
+    # 1. 建立 Telegram Bot Application
+    bot_app = Application.builder().token(tg_token).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+    # 2. 啟動 Telegram Bot Polling
+    await bot_app.initialize()
+    await bot_app.start()
+    await bot_app.updater.start_polling()
+
+    # 3. 啟動 aiohttp Web 伺服器滿足 Render 連線需求
+    app = web.Application()
+    app.router.add_get('/', handle_health_check)
+    
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+    print(f"Web 伺服器與 Bot 成功喺 Port {port} 運行中...")
+    
+    # 維持異步事件循環運行
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await bot_app.updater.stop()
+        await bot_app.stop()
+        await bot_app.shutdown()
+
+if __name__ == '__main__':
+    asyncio.run(main())
 
 if __name__ == '__main__':
     main()
