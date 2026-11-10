@@ -10,38 +10,48 @@ from google.genai import types
 from aiohttp import web
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# 讀取 Gemini API Key
+api_key = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key) if api_key else None
 
 SYSTEM_INSTRUCTION = "你係一個精明、友善且幽默嘅 AI 助手，請統一用廣東話口語回覆使用者。"
-user_chats = {}
 
-def get_user_chat(chat_id: int):
-    if chat_id not in user_chats:
-        user_chats[chat_id] = client.chats.create(
-            model='gemini-1.5-flash',
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("你好！我係免費嘅 Gemini AI 助手，請隨便問我問題或者傳圖片畀我！")
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_text = update.message.text
+    try:
+        if not client:
+            raise ValueError("GEMINI_API_KEY 未設定")
+        
+        # 使用最新 SDK 標準語法調用 gemini-2.5-flash 或 gemini-1.5-flash
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=user_text,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 temperature=0.7,
             )
         )
-    return user_chats[chat_id]
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    if chat_id in user_chats:
-        del user_chats[chat_id]
-    await update.message.reply_text("你好！我係免費嘅 Gemini AI 助手，請隨便問我問題或者傳圖片畀我！")
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    user_text = update.message.text
-    chat = get_user_chat(chat_id)
-    try:
-        response = chat.send_message(user_text)
         await update.message.reply_text(response.text)
     except Exception as e:
         logging.error(f"Error: {e}")
-        await update.message.reply_text("系統處理時出咗錯，請稍後再試。")
+        # 如果 2.5 失敗，嘗試降級備用 1.5-flash
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=user_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.7,
+                )
+            )
+            await update.message.reply_text(response.text)
+        except Exception as e2:
+            logging.error(f"Fallback Error: {e2}")
+            await update.message.reply_text("系統處理時出咗錯，請檢查 API Key 是否正確。")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     caption = update.message.caption or "請分析呢張圖片。"
@@ -49,8 +59,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         image = Image.open(io.BytesIO(photo_bytes))
+        
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=[image, caption],
             config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
         )
@@ -59,7 +70,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logging.error(f"Photo Error: {e}")
         await update.message.reply_text("分析圖片時出咗錯。")
 
-# 簡單的 HTTP 伺服器，讓 Render 的 Web Service 認定 App 正在運行
 async def handle_health_check(request):
     return web.Response(text="Bot is running!")
 
@@ -68,18 +78,15 @@ async def main():
     if not tg_token:
         raise ValueError("Missing TELEGRAM_BOT_TOKEN environment variable")
 
-    # 1. 建立 Telegram Bot Application
     bot_app = Application.builder().token(tg_token).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # 2. 啟動 Telegram Bot Polling
     await bot_app.initialize()
     await bot_app.start()
     await bot_app.updater.start_polling()
 
-    # 3. 啟動 aiohttp Web 伺服器滿足 Render 連線需求
     app = web.Application()
     app.router.add_get('/', handle_health_check)
     
@@ -89,9 +96,6 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-    print(f"Web 伺服器與 Bot 成功喺 Port {port} 運行中...")
-    
-    # 維持異步事件循環運行
     try:
         await asyncio.Event().wait()
     finally:
