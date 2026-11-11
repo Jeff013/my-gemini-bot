@@ -11,22 +11,27 @@ from aiohttp import web
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# 讀取 Gemini API Key
-api_key = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=api_key) if api_key else None
-
 SYSTEM_INSTRUCTION = "你係一個精明、友善且幽默嘅 AI 助手，請統一用廣東話口語回覆使用者。"
+
+def get_client():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    return genai.Client(api_key=api_key)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("你好！我係免費嘅 Gemini AI 助手，請隨便問我問題或者傳圖片畀我！")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
+    client = get_client()
+    
+    if not client:
+        await update.message.reply_text("系統未檢測到 GEMINI_API_KEY，請檢查 Render 環境變數設定。")
+        return
+
     try:
-        if not client:
-            raise ValueError("GEMINI_API_KEY 未設定")
-        
-        # 使用最新 SDK 標準語法調用 gemini-2.5-flash 或 gemini-1.5-flash
+        # 使用標準 gemini-2.5-flash 模型名稱
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=user_text,
@@ -37,11 +42,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await update.message.reply_text(response.text)
     except Exception as e:
-        logging.error(f"Error: {e}")
-        # 如果 2.5 失敗，嘗試降級備用 1.5-flash
+        logging.error(f"Main Error: {e}")
         try:
+            # 備用嘗試 gemini-2.0-flash
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.0-flash',
                 contents=user_text,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
@@ -51,10 +56,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(response.text)
         except Exception as e2:
             logging.error(f"Fallback Error: {e2}")
-            await update.message.reply_text("系統處理時出咗錯，請檢查 API Key 是否正確。")
+            await update.message.reply_text(f"API 調用失敗，請確認 API Key 是否在 Google AI Studio 啟用。錯誤: {str(e2)[:50]}")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     caption = update.message.caption or "請分析呢張圖片。"
+    client = get_client()
+    if not client:
+        await update.message.reply_text("系統未檢測到 GEMINI_API_KEY。")
+        return
+
     try:
         photo_file = await update.message.photo[-1].get_file()
         photo_bytes = await photo_file.download_as_bytearray()
